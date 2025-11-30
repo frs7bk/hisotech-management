@@ -1,8 +1,5 @@
-import { drizzle } from "drizzle-orm/neon-serverless";
-import { Pool, neonConfig } from "@neondatabase/serverless";
-import ws from "ws";
-import { 
-  products, masterAccounts, subscriptions, revenues, expenses, invoices, notifications,
+import { supabase } from "./supabase";
+import {
   type Product, type InsertProduct,
   type MasterAccount, type InsertMasterAccount,
   type Subscription, type InsertSubscription,
@@ -11,18 +8,6 @@ import {
   type Invoice, type InsertInvoice,
   type Notification, type InsertNotification,
 } from "@shared/schema";
-import { eq, and, gte, lte, like, or, desc, sql } from "drizzle-orm";
-
-neonConfig.webSocketConstructor = ws;
-
-if (!process.env.DATABASE_URL) {
-  throw new Error(
-    "DATABASE_URL must be set. Did you forget to provision a database?",
-  );
-}
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-export const db = drizzle(pool);
 
 export interface IStorage {
   getProducts(): Promise<Product[]>;
@@ -30,42 +15,42 @@ export interface IStorage {
   createProduct(product: InsertProduct): Promise<Product>;
   updateProduct(id: string, product: Partial<InsertProduct>): Promise<Product | undefined>;
   deleteProduct(id: string): Promise<boolean>;
-  
+
   getMasterAccounts(productId?: string): Promise<MasterAccount[]>;
   getMasterAccount(id: string): Promise<MasterAccount | undefined>;
   createMasterAccount(account: InsertMasterAccount): Promise<MasterAccount>;
   updateMasterAccount(id: string, account: Partial<InsertMasterAccount>): Promise<MasterAccount | undefined>;
   deleteMasterAccount(id: string): Promise<boolean>;
-  
+
   getSubscriptions(filters?: { productId?: string; masterAccountId?: string; status?: string }): Promise<Subscription[]>;
   getSubscription(id: string): Promise<Subscription | undefined>;
   createSubscription(subscription: InsertSubscription): Promise<Subscription>;
   updateSubscription(id: string, subscription: Partial<InsertSubscription>): Promise<Subscription | undefined>;
   deleteSubscription(id: string): Promise<boolean>;
   deleteExpiredSubscriptions(daysOld: number): Promise<number>;
-  
+
   getRevenues(filters?: { productId?: string; startDate?: Date; endDate?: Date }): Promise<Revenue[]>;
   createRevenue(revenue: InsertRevenue): Promise<Revenue>;
   deleteRevenue(id: string): Promise<boolean>;
-  
+
   getExpenses(filters?: { productId?: string; startDate?: Date; endDate?: Date; isPaid?: boolean }): Promise<Expense[]>;
   createExpense(expense: InsertExpense): Promise<Expense>;
   updateExpense(id: string, expense: Partial<InsertExpense>): Promise<Expense | undefined>;
   deleteExpense(id: string): Promise<boolean>;
-  
+
   getInvoices(filters?: { status?: string }): Promise<Invoice[]>;
   getInvoice(id: string): Promise<Invoice | undefined>;
   createInvoice(invoice: InsertInvoice): Promise<Invoice>;
   updateInvoice(id: string, invoice: Partial<InsertInvoice>): Promise<Invoice | undefined>;
   deleteInvoice(id: string): Promise<boolean>;
-  
+
   getNotifications(isRead?: boolean): Promise<Notification[]>;
   createNotification(notification: InsertNotification): Promise<Notification>;
   updateNotification(id: string, notification: Partial<InsertNotification>): Promise<Notification | undefined>;
   markNotificationAsRead(id: string): Promise<boolean>;
   markAllNotificationsAsRead(): Promise<boolean>;
   deleteNotification(id: string): Promise<boolean>;
-  
+
   search(query: string): Promise<{
     products: Product[];
     subscriptions: Subscription[];
@@ -73,16 +58,16 @@ export interface IStorage {
   }>;
 }
 
-export class DbStorage implements IStorage {
+export class SupabaseStorage implements IStorage {
   private calculateSubscriptionStatus(endDate: Date): string {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
+
     const end = new Date(endDate);
     end.setHours(0, 0, 0, 0);
-    
+
     const dayDiff = Math.floor((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-    
+
     if (dayDiff < 0) {
       return "expired";
     } else if (dayDiff <= 1) {
@@ -100,118 +85,203 @@ export class DbStorage implements IStorage {
   }
 
   async getProducts(): Promise<Product[]> {
-    return await db.select().from(products).orderBy(desc(products.createdAt));
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw new Error(error.message);
+    return data || [];
   }
 
   async getProduct(id: string): Promise<Product | undefined> {
-    const result = await db.select().from(products).where(eq(products.id, id));
-    return result[0];
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async createProduct(product: InsertProduct): Promise<Product> {
-    const result = await db.insert(products).values(product).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('products')
+      .insert(product)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data;
   }
 
   async updateProduct(id: string, product: Partial<InsertProduct>): Promise<Product | undefined> {
-    const result = await db.update(products).set(product).where(eq(products.id, id)).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('products')
+      .update(product)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async deleteProduct(id: string): Promise<boolean> {
-    const result = await db.delete(products).where(eq(products.id, id));
+    const { error } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async getMasterAccounts(productId?: string): Promise<MasterAccount[]> {
+    let query = supabase
+      .from('master_accounts')
+      .select('*')
+      .order('created_at', { ascending: false });
+
     if (productId) {
-      return await db.select().from(masterAccounts).where(eq(masterAccounts.productId, productId)).orderBy(desc(masterAccounts.createdAt));
+      query = query.eq('product_id', productId);
     }
-    return await db.select().from(masterAccounts).orderBy(desc(masterAccounts.createdAt));
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return data || [];
   }
 
   async getMasterAccount(id: string): Promise<MasterAccount | undefined> {
-    const result = await db.select().from(masterAccounts).where(eq(masterAccounts.id, id));
-    return result[0];
+    const { data, error } = await supabase
+      .from('master_accounts')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async createMasterAccount(account: InsertMasterAccount): Promise<MasterAccount> {
-    const result = await db.insert(masterAccounts).values(account).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('master_accounts')
+      .insert(account)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data;
   }
 
   async updateMasterAccount(id: string, account: Partial<InsertMasterAccount>): Promise<MasterAccount | undefined> {
-    const result = await db.update(masterAccounts).set(account).where(eq(masterAccounts.id, id)).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('master_accounts')
+      .update(account)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async deleteMasterAccount(id: string): Promise<boolean> {
-    await db.delete(masterAccounts).where(eq(masterAccounts.id, id));
+    const { error } = await supabase
+      .from('master_accounts')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async getSubscriptions(filters?: { productId?: string; masterAccountId?: string; status?: string }): Promise<Subscription[]> {
-    const conditions = [];
-    if (filters?.productId) conditions.push(eq(subscriptions.productId, filters.productId));
-    if (filters?.masterAccountId) conditions.push(eq(subscriptions.masterAccountId, filters.masterAccountId));
-    
-    let query = db.select().from(subscriptions);
-    if (conditions.length > 0) {
-      query = conditions.length === 1 ? query.where(conditions[0]) : query.where(and(...conditions));
+    let query = supabase
+      .from('subscriptions')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (filters?.productId) {
+      query = query.eq('product_id', filters.productId);
     }
-    
-    const subs = await query.orderBy(desc(subscriptions.createdAt));
-    
-    // Calculate and update status based on endDate
-    const updatedSubs = subs.map(sub => this.updateSubscriptionStatus(sub));
-    
-    // Filter by status after updating
+    if (filters?.masterAccountId) {
+      query = query.eq('master_account_id', filters.masterAccountId);
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+
+    const subs = data || [];
+    const updatedSubs = subs.map(sub => this.updateSubscriptionStatus(sub as any));
+
     if (filters?.status && filters.status !== "all") {
       return updatedSubs.filter(sub => sub.status === filters.status);
     }
-    
+
     return updatedSubs;
   }
 
   async getSubscription(id: string): Promise<Subscription | undefined> {
-    const result = await db.select().from(subscriptions).where(eq(subscriptions.id, id));
-    if (result[0]) {
-      return this.updateSubscriptionStatus(result[0]);
+    const { data, error } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    if (data) {
+      return this.updateSubscriptionStatus(data as any);
     }
     return undefined;
   }
 
   async createSubscription(subscription: InsertSubscription): Promise<Subscription> {
-    const result = await db.insert(subscriptions).values(subscription).returning();
-    
-    await db.update(masterAccounts)
-      .set({ currentUsage: sql`${masterAccounts.currentUsage} + 1` })
-      .where(eq(masterAccounts.id, subscription.masterAccountId));
-    
-    return this.updateSubscriptionStatus(result[0]);
+    const { data, error } = await supabase
+      .from('subscriptions')
+      .insert(subscription)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    const { error: updateError } = await supabase.rpc('increment_master_account_usage', {
+      account_id: subscription.masterAccountId
+    });
+
+    if (updateError) console.error('Error updating master account usage:', updateError);
+
+    return this.updateSubscriptionStatus(data as any);
   }
 
   async updateSubscription(id: string, subscription: Partial<InsertSubscription>): Promise<Subscription | undefined> {
-    const oldSub = await db.select().from(subscriptions).where(eq(subscriptions.id, id));
-    const oldSubData = oldSub[0];
-    
-    const result = await db.update(subscriptions).set({
-      ...subscription,
-      updatedAt: new Date(),
-    }).where(eq(subscriptions.id, id)).returning();
-    
-    if (subscription.masterAccountId && oldSubData && subscription.masterAccountId !== oldSubData.masterAccountId) {
-      await db.update(masterAccounts)
-        .set({ currentUsage: sql`${masterAccounts.currentUsage} - 1` })
-        .where(eq(masterAccounts.id, oldSubData.masterAccountId));
-      
-      await db.update(masterAccounts)
-        .set({ currentUsage: sql`${masterAccounts.currentUsage} + 1` })
-        .where(eq(masterAccounts.id, subscription.masterAccountId));
+    const oldSub = await this.getSubscription(id);
+
+    const { data, error } = await supabase
+      .from('subscriptions')
+      .update({
+        ...subscription,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+
+    if (subscription.masterAccountId && oldSub && subscription.masterAccountId !== oldSub.masterAccountId) {
+      await supabase.rpc('decrement_master_account_usage', {
+        account_id: oldSub.masterAccountId
+      });
+
+      await supabase.rpc('increment_master_account_usage', {
+        account_id: subscription.masterAccountId
+      });
     }
-    
-    if (result[0]) {
-      return this.updateSubscriptionStatus(result[0]);
+
+    if (data) {
+      return this.updateSubscriptionStatus(data as any);
     }
     return undefined;
   }
@@ -219,180 +289,292 @@ export class DbStorage implements IStorage {
   async deleteSubscription(id: string): Promise<boolean> {
     const subscription = await this.getSubscription(id);
     if (!subscription) return false;
-    
-    await db.delete(subscriptions).where(eq(subscriptions.id, id));
-    
-    await db.update(masterAccounts)
-      .set({ currentUsage: sql`${masterAccounts.currentUsage} - 1` })
-      .where(eq(masterAccounts.id, subscription.masterAccountId));
-    
+
+    const { error } = await supabase
+      .from('subscriptions')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
+
+    await supabase.rpc('decrement_master_account_usage', {
+      account_id: subscription.masterAccountId
+    });
+
     return true;
   }
 
   async deleteExpiredSubscriptions(daysOld: number): Promise<number> {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - daysOld);
-    cutoffDate.setHours(0, 0, 0, 0);
-    
-    const expiredSubs = await db.select().from(subscriptions)
-      .where(lte(subscriptions.endDate, cutoffDate));
-    
-    for (const sub of expiredSubs) {
-      await db.update(masterAccounts)
-        .set({ currentUsage: sql`${masterAccounts.currentUsage} - 1` })
-        .where(eq(masterAccounts.id, sub.masterAccountId));
+
+    const { data: expiredSubs, error: selectError } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .lte('end_date', cutoffDate.toISOString());
+
+    if (selectError) throw new Error(selectError.message);
+
+    if (expiredSubs && expiredSubs.length > 0) {
+      for (const sub of expiredSubs) {
+        await this.deleteSubscription(sub.id);
+      }
+      return expiredSubs.length;
     }
-    
-    const result = await db.delete(subscriptions)
-      .where(lte(subscriptions.endDate, cutoffDate));
-    
-    return expiredSubs.length;
+
+    return 0;
   }
 
   async getRevenues(filters?: { productId?: string; startDate?: Date; endDate?: Date }): Promise<Revenue[]> {
-    let query = db.select().from(revenues);
-    
-    if (filters?.productId || filters?.startDate || filters?.endDate) {
-      const conditions = [];
-      if (filters.productId) conditions.push(eq(revenues.productId, filters.productId));
-      if (filters.startDate) conditions.push(gte(revenues.date, filters.startDate));
-      if (filters.endDate) conditions.push(lte(revenues.date, filters.endDate));
-      
-      return await query.where(and(...conditions)).orderBy(desc(revenues.date));
+    let query = supabase
+      .from('revenues')
+      .select('*')
+      .order('date', { ascending: false });
+
+    if (filters?.productId) {
+      query = query.eq('product_id', filters.productId);
     }
-    
-    return await query.orderBy(desc(revenues.date));
+    if (filters?.startDate) {
+      query = query.gte('date', filters.startDate.toISOString());
+    }
+    if (filters?.endDate) {
+      query = query.lte('date', filters.endDate.toISOString());
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return data || [];
   }
 
   async createRevenue(revenue: InsertRevenue): Promise<Revenue> {
-    const result = await db.insert(revenues).values(revenue).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('revenues')
+      .insert(revenue)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data;
   }
 
   async deleteRevenue(id: string): Promise<boolean> {
-    await db.delete(revenues).where(eq(revenues.id, id));
+    const { error } = await supabase
+      .from('revenues')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async getExpenses(filters?: { productId?: string; startDate?: Date; endDate?: Date; isPaid?: boolean }): Promise<Expense[]> {
-    let query = db.select().from(expenses);
-    
-    if (filters?.productId || filters?.startDate || filters?.endDate || filters?.isPaid !== undefined) {
-      const conditions = [];
-      if (filters.productId) conditions.push(eq(expenses.productId, filters.productId));
-      if (filters.startDate) conditions.push(gte(expenses.date, filters.startDate));
-      if (filters.endDate) conditions.push(lte(expenses.date, filters.endDate));
-      if (filters.isPaid !== undefined) conditions.push(eq(expenses.isPaid, filters.isPaid));
-      
-      return await query.where(and(...conditions)).orderBy(desc(expenses.date));
+    let query = supabase
+      .from('expenses')
+      .select('*')
+      .order('date', { ascending: false });
+
+    if (filters?.productId) {
+      query = query.eq('product_id', filters.productId);
     }
-    
-    return await query.orderBy(desc(expenses.date));
+    if (filters?.startDate) {
+      query = query.gte('date', filters.startDate.toISOString());
+    }
+    if (filters?.endDate) {
+      query = query.lte('date', filters.endDate.toISOString());
+    }
+    if (filters?.isPaid !== undefined) {
+      query = query.eq('is_paid', filters.isPaid);
+    }
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return data || [];
   }
 
   async createExpense(expense: InsertExpense): Promise<Expense> {
-    const result = await db.insert(expenses).values(expense).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('expenses')
+      .insert(expense)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data;
   }
 
   async updateExpense(id: string, expense: Partial<InsertExpense>): Promise<Expense | undefined> {
-    const result = await db.update(expenses).set(expense).where(eq(expenses.id, id)).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('expenses')
+      .update(expense)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async deleteExpense(id: string): Promise<boolean> {
-    await db.delete(expenses).where(eq(expenses.id, id));
+    const { error } = await supabase
+      .from('expenses')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async getInvoices(filters?: { status?: string }): Promise<Invoice[]> {
+    let query = supabase
+      .from('invoices')
+      .select('*')
+      .order('created_at', { ascending: false });
+
     if (filters?.status) {
-      return await db.select().from(invoices).where(eq(invoices.status, filters.status as any)).orderBy(desc(invoices.createdAt));
+      query = query.eq('status', filters.status);
     }
-    return await db.select().from(invoices).orderBy(desc(invoices.createdAt));
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return data || [];
   }
 
   async getInvoice(id: string): Promise<Invoice | undefined> {
-    const result = await db.select().from(invoices).where(eq(invoices.id, id));
-    return result[0];
+    const { data, error } = await supabase
+      .from('invoices')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async createInvoice(invoice: InsertInvoice): Promise<Invoice> {
-    const result = await db.insert(invoices).values(invoice).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('invoices')
+      .insert(invoice)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data;
   }
 
   async updateInvoice(id: string, invoice: Partial<InsertInvoice>): Promise<Invoice | undefined> {
-    const result = await db.update(invoices).set(invoice).where(eq(invoices.id, id)).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('invoices')
+      .update(invoice)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async deleteInvoice(id: string): Promise<boolean> {
-    await db.delete(invoices).where(eq(invoices.id, id));
+    const { error } = await supabase
+      .from('invoices')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async getNotifications(isRead?: boolean): Promise<Notification[]> {
+    let query = supabase
+      .from('notifications')
+      .select('*')
+      .order('created_at', { ascending: false });
+
     if (isRead !== undefined) {
-      return await db.select().from(notifications).where(eq(notifications.isRead, isRead)).orderBy(desc(notifications.createdAt));
+      query = query.eq('is_read', isRead);
     }
-    return await db.select().from(notifications).orderBy(desc(notifications.createdAt));
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return data || [];
   }
 
   async createNotification(notification: InsertNotification): Promise<Notification> {
-    const result = await db.insert(notifications).values(notification).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('notifications')
+      .insert(notification)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data;
   }
 
   async updateNotification(id: string, notification: Partial<InsertNotification>): Promise<Notification | undefined> {
-    const result = await db.update(notifications).set(notification).where(eq(notifications.id, id)).returning();
-    return result[0];
+    const { data, error } = await supabase
+      .from('notifications')
+      .update(notification)
+      .eq('id', id)
+      .select()
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    return data || undefined;
   }
 
   async markNotificationAsRead(id: string): Promise<boolean> {
-    await db.update(notifications).set({ isRead: true }).where(eq(notifications.id, id));
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async markAllNotificationsAsRead(): Promise<boolean> {
-    await db.update(notifications).set({ isRead: true }).where(eq(notifications.isRead, false));
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('is_read', false);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async deleteNotification(id: string): Promise<boolean> {
-    await db.delete(notifications).where(eq(notifications.id, id));
+    const { error } = await supabase
+      .from('notifications')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw new Error(error.message);
     return true;
   }
 
   async search(query: string): Promise<{ products: Product[]; subscriptions: Subscription[]; invoices: Invoice[] }> {
     const searchPattern = `%${query}%`;
-    
-    const productsResults = await db.select().from(products)
-      .where(or(
-        like(products.name, searchPattern),
-        like(products.description, searchPattern)
-      ));
-    
-    const subscriptionsResults = await db.select().from(subscriptions)
-      .where(or(
-        like(subscriptions.customerName, searchPattern),
-        like(subscriptions.customerEmail, searchPattern),
-        like(subscriptions.customerWhatsapp, searchPattern)
-      ));
-    
-    const invoicesResults = await db.select().from(invoices)
-      .where(or(
-        like(invoices.invoiceNumber, searchPattern),
-        like(invoices.customerName, searchPattern),
-        like(invoices.customerEmail, searchPattern)
-      ));
-    
+
+    const { data: productsData } = await supabase
+      .from('products')
+      .select('*')
+      .or(`name.ilike.${searchPattern},description.ilike.${searchPattern}`);
+
+    const { data: subscriptionsData } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .or(`customer_name.ilike.${searchPattern},customer_email.ilike.${searchPattern},customer_whatsapp.ilike.${searchPattern}`);
+
+    const { data: invoicesData } = await supabase
+      .from('invoices')
+      .select('*')
+      .or(`invoice_number.ilike.${searchPattern},customer_name.ilike.${searchPattern},customer_email.ilike.${searchPattern}`);
+
     return {
-      products: productsResults,
-      subscriptions: subscriptionsResults,
-      invoices: invoicesResults,
+      products: productsData || [],
+      subscriptions: subscriptionsData || [],
+      invoices: invoicesData || [],
     };
   }
 }
 
-export const storage = new DbStorage();
+export const storage = new SupabaseStorage();
